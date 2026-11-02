@@ -15,9 +15,7 @@ class RegisterRequest(BaseModel):
     email: EmailText
     password: PasswordText
     identification: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=13)]
-    phone: Annotated[str, StringConstraints(strip_whitespace=True, min_length=7, max_length=10)]
     city_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=3)]
-    address: Annotated[str, StringConstraints(strip_whitespace=True, min_length=4, max_length=60)]
 
     @field_validator("email")
     @classmethod
@@ -27,12 +25,12 @@ class RegisterRequest(BaseModel):
             raise ValueError("Invalid email address")
         return value
 
-    @field_validator("identification", "phone")
+    @field_validator("identification")
     @classmethod
-    def digits_only(cls, value: str) -> str:
+    def identification_digits_only(cls, value: str) -> str:
         digits = re.sub(r"\D", "", value)
         if len(digits) != len(value) or len(digits) not in range(7, 14):
-            raise ValueError("Use digits only")
+            raise ValueError("Identification must contain digits only")
         return digits
 
 
@@ -40,6 +38,28 @@ class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     email: EmailText
     password: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+
+
+class AdminInvitationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailText
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        value = value.lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("Invalid email address")
+        return value
+
+
+class AdminRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    invitation_token: Annotated[str, StringConstraints(strip_whitespace=True, min_length=32, max_length=128)]
+    full_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=120)]
+    password: PasswordText
 
 
 class CartItemRequest(BaseModel):

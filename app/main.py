@@ -8,7 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import settings
 from app.database import get_db
-from app.routers import admin, auth, cart, checkout, products
+from app.routers import admin, admin_operations, auth, cart, checkout, favorites, products
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +47,10 @@ def readiness(db=Depends(get_db)) -> dict[str, str]:
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(products.router, prefix="/api/v1")
 app.include_router(cart.router, prefix="/api/v1")
+app.include_router(favorites.router, prefix="/api/v1")
 app.include_router(checkout.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
+app.include_router(admin_operations.router, prefix="/api/v1")
 
 
 @app.exception_handler(SQLAlchemyError)

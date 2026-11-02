@@ -1,6 +1,6 @@
 # Alineación entre interfaces, API y base de datos
 
-**Fecha de revisión:** 1 de noviembre de 2026
+**Fecha de revisión:** 2 de noviembre de 2026
 **Alcance:** interfaces publicadas de Apex Sports E-commerce y Administración, descripciones técnicas compartidas y scripts de creación/constraints de PostgreSQL. La vista o scripts adicionales de vistas SQL no fueron incluidos en esta revisión; se considera que existen, según lo indicado por el responsable del proyecto.
 
 ## Conclusión ejecutiva
@@ -11,9 +11,9 @@ El esquema cubre la mayoría de las entidades que necesita el panel administrati
 2. El registro solicita nombre completo, correo y contraseña; el esquema exige nombre y apellido en `USUARIOS`, mientras `CLIENTES` exige además identificación y ciudad.
 3. El checkout recoge datos de entrega y opciones de envío, pero el esquema no conserva una dirección completa e inmutable asociada a la compra ni el costo de envío.
 4. `FACTURAS` no distingue claramente pedido, pago e invoice/factura fiscal; su estado predeterminado es `PAG`, aunque los métodos de pago de la interfaz son demostrativos.
-5. El panel tiene login, resumen y operaciones administrativas que necesitan autorización real del servidor; sus datos actuales son ficticios.
+5. El panel requiere conectar las acciones de sus formularios a los nuevos endpoints administrativos; autenticación, permisos por módulo/acción y recursos de servidor ya están implementados en la API.
 
-Recomendación: conservar una sola API FastAPI para ambos frontends, usar la base como fuente de verdad y resolver los puntos 1–4 antes de programar checkout y ventas. No exponer credenciales de PostgreSQL/Supabase a ninguna interfaz.
+Recomendación: conservar una sola API FastAPI para ambos frontends, usar la base como fuente de verdad y resolver los puntos 1–4 antes de habilitar pagos reales. La migración 004 implementa los flujos administrativos de forma transaccional y elimina los efectos duplicados de inventario de los triggers heredados. No exponer credenciales de PostgreSQL/Supabase a ninguna interfaz.
 
 ## Qué ya coincide
 
@@ -21,11 +21,11 @@ Recomendación: conservar una sola API FastAPI para ambos frontends, usar la bas
 |---|---|---|
 | Categorías, marcas, productos y fotografías | `CATEGORIAS`, `MARCAS`, `PRODUCTOS`, `PRODUCTO_FOTOGRAFIAS` | Cobertura básica. La API puede proyectar sus relaciones al contrato del catálogo. |
 | Cuenta asociada a perfil de cliente | `USUARIOS`, `CLIENTES.id_Usuario` único y opcional | Compatible con una cuenta por cliente. El registro debe crear ambas entidades en una transacción cuando se complete el perfil de compra. |
-| Cuenta, roles y permisos del panel | `USUARIOS`, `ROLES`, `PERMISOS`, `USUARIOSxROLES`, `ROLESxPERMISOS` | Modelo adecuado en concepto. Faltan datos iniciales de roles/permisos y autorización implementada por endpoint. |
+| Cuenta, roles y permisos del panel | `USUARIOS`, `ROLES`, `PERMISOS`, `USUARIOSxROLES`, `ROLESxPERMISOS` | Migración 004 siembra permisos por módulo/acción y la API comprueba cada operación; la asignación de roles/permisos queda restringida a superadministradores. |
 | Carrito para una cuenta autenticada | `CARRITO` tiene `id_Usuario` y `uk_carrito_usuario` | Compatible con la decisión de exigir cuenta; la API debe validar precios y disponibilidad al confirmar. |
-| Proveedores, órdenes de compra y recepciones | `PROVEEDORES`, `COMPRAS`, `PROxOC`, `RECEPCIONES`, `PROxREC` | Cobertura básica para los módulos del panel. Las recepciones parciales requieren reglas transaccionales y validación de cantidades. |
-| Ventas, líneas y entregas | `FACTURAS`, `PROxFAC`, `ENTREGAS`, `PROxENT` | Entidades relacionadas disponibles, pero el contrato de pedido, pago, envío y estados necesita definirse. |
-| Indicadores del panel | Datos subyacentes de productos, facturas, clientes, compras y auditoría | Se pueden calcular con consultas o vistas; deben sustituir las cifras ficticias y recibir periodos explícitos. |
+| Proveedores, órdenes de compra y recepciones | `PROVEEDORES`, `COMPRAS`, `PROxOC`, `RECEPCIONES`, `PROxREC` | La API incorpora altas/edición, órdenes y recepciones parciales; stock aumenta una sola vez al confirmar la recepción. |
+| Ventas, líneas y entregas | `FACTURAS`, `PROxFAC`, `ENTREGAS`, `PROxENT` | La API crea ventas/facturas en borrador, descuenta stock al aprobar y registra entrega sin un segundo descuento. No confirma pagos ni emite factura fiscal. |
+| Indicadores del panel | Datos subyacentes de productos, facturas, clientes, compras y auditoría | Resumen con periodo, serie diaria, ventas pagadas preexistentes, stock bajo, ventas recientes y actividad de auditoría. |
 
 ## Cambios necesarios en las interfaces
 
@@ -47,18 +47,17 @@ La interfaz puede conservar su diseño, categorías, búsqueda, fichas, carrito,
 
 ### Panel administrativo
 
-El panel ya organiza las áreas operativas apropiadas, pero el estado de demostración y los formularios locales deben cambiar para operar sobre la API.
+El panel en modo API ya autentica, consulta datos reales y muestra tablas. La API incorpora contratos para operaciones administrativas y el siguiente trabajo de interfaz es conectar los formularios a esos endpoints; las acciones locales no deben mostrarse como guardadas.
 
 | Prioridad | Cambio requerido |
 |---|---|
-| Bloqueante | **Añadir autenticación real del panel** y obtener el perfil/roles desde `/api/v1/auth/me`. La identidad ficticia de “Valentina Ruiz” no puede conceder privilegios. Las cuentas administrativas deben aprovisionarse por un administrador; el registro público del e-commerce asigna exclusivamente el rol de cliente. |
-| Bloqueante | **Aplicar autorización por operación en backend.** Ocultar/deshabilitar navegación o botones según permisos mejora UX, pero la API debe rechazar cada operación no autorizada. No permitir asignar roles desde campos libres del navegador. |
-| Bloqueante | **Reemplazar datos de muestra en cada módulo** por recursos de API: resumen, productos, inventario, compras, proveedores, recepciones, ventas/facturas, entregas, clientes, usuarios/roles y auditoría. Los formularios deben reflejar éxito solo después de respuesta confirmada del servidor. |
-| Bloqueante | **Alinear las columnas y estados** con contratos API documentados. Definir etiquetas visibles para los códigos SQL (`ACT`, `PEN`, `PAG`, etc.) y manejar estados/transiciones permitidos en el backend. No deducir estados por texto del navegador. |
-| Bloqueante | **Ajustar alta/edición de productos** a los `NOT NULL` de `PRODUCTOS`: ubicación (`id_Percha`), categoría, marca, unidades de compra/venta, costo y precio son requeridos por el esquema. La interfaz administrativa debe recogerlos o el backend debe aplicar defaults de negocio explícitos y válidos; no insertar valores ficticios para satisfacer columnas. Los IDs de categoría de las secciones web se deben mapear a IDs de base de datos. |
-| Bloqueante | **Registrar ventas y movimientos con transacciones.** Una venta, sus detalles, el cambio de stock y el registro de auditoría no deben quedar parcialmente guardados si una operación falla. Lo mismo para órdenes/recepciones y ajustes. |
-| Recomendado | **Poblar el dashboard con consultas agregadas** de servidor y filtros de fecha/zona horaria. La disponibilidad, alertas por stock mínimo, ventas y actividad no deben provenir de arreglos locales ni de cálculos del cliente. |
-| Recomendado | **Poblar auditoría exclusivamente desde el backend.** La interfaz solo consulta, filtra y pagina los eventos; nunca crea o edita un evento para afirmar que una operación ocurrió. |
+| API implementada | **Autenticación y permisos.** Sesión administrativa por invitación; operaciones protegidas por grants módulo/acción. Aplicar `migrations/004_admin_workflows.sql` y aprovisionar al menos un superadministrador. |
+| API implementada | **Lectura administrativa.** Resumen por fecha, recursos paginados con búsqueda/estado/fechas, consultas de detalle con líneas y lookups para formularios. |
+| API implementada | **Escrituras transaccionales.** Productos, proveedores, clientes, compras/recepciones, ajustes, ventas/facturas, entregas, usuarios y permisos tienen contratos de escritura; cada cambio administrativo audita al actor. |
+| API implementada | **Ciclo de inventario aprobado.** Compras no cambian stock; recepción confirmada suma cantidades aceptadas; venta aprobada descuenta una vez; entrega completada no descuenta de nuevo; ajuste aplica delta firmado al aprobar. |
+| Pendiente de interfaz | **Conectar formularios al API.** Enviar los contratos documentados y mostrar éxito solo después de confirmación del servidor. La vista actual de API es principalmente de consulta y todavía no invoca la mayoría de las escrituras. |
+| Pendiente de negocio | **Pagos y emisión fiscal.** La API no confirma pagos, no cambia facturas a `PAG` y no genera una factura fiscal. La interfaz debe mantener explícita esa limitación. |
+| Recomendado | **Conservar UX accesible con los estados de API:** carga, error recuperable, sin resultados, sin permiso, sesión expirada y confirmación de cambios, incluyendo anuncios para lectores de pantalla y foco predecible. |
 | Recomendado | **Conservar UX accesible con los estados de API:** carga, error recuperable, sin resultados, sin permiso, sesión expirada y confirmación de cambios, incluyendo anuncios para lectores de pantalla y foco predecible. |
 
 ### Origen de sesión y despliegue de las interfaces

@@ -1,19 +1,23 @@
+import hashlib
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.audit import write_audit
 from app.database import get_db
-from app.schemas import LoginRequest, RegisterRequest
+from app.schemas import AdminInvitationRequest, AdminRegistrationRequest, LoginRequest, RegisterRequest
 from app.security import (
     Principal,
     current_principal,
     enforce_login_limit,
     hash_password,
     issue_token,
+    authorize_permission,
+    require_admin,
     verify_password,
 )
 
@@ -32,6 +36,10 @@ def _session_response(token: str, expires_at: datetime, principal: Principal) ->
             "roles": sorted(principal.roles),
         },
     }
+
+
+def _write_admin_audit(db: Session, user_id: str, action: str, client_ip: str | None) -> None:
+    write_audit(db, user_id, "APEX_ADMIN_INVITATIONS", action, client_ip=client_ip)
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
@@ -80,7 +88,7 @@ def register(body: RegisterRequest, request: Request, db: Session = Depends(get_
                     "first_name": first_name,
                     "last_name": last_name,
                     "email": body.email,
-                    "phone": body.phone,
+                    "phone": None,
                 },
             )
             db.execute(
@@ -102,10 +110,10 @@ def register(body: RegisterRequest, request: Request, db: Session = Depends(get_
                     "user_id": user_id,
                     "name": body.full_name[:40],
                     "identification": body.identification,
-                    "phone": body.phone,
+                    "phone": None,
                     "email": body.email,
                     "city": body.city_id,
-                    "address": body.address,
+                    "address": None,
                 },
             )
             token, expires_at = issue_token(db, user_id)
@@ -115,6 +123,162 @@ def register(body: RegisterRequest, request: Request, db: Session = Depends(get_
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Email, username, or identification is already registered",
+        ) from exc
+    return _session_response(token, expires_at, principal)
+
+
+@router.post("/admin/invitations", status_code=status.HTTP_201_CREATED)
+def create_admin_invitation(
+    body: AdminInvitationRequest,
+    request: Request,
+    principal: Principal = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    authorize_permission(db, principal, "users", "write")
+    enforce_login_limit(f"admin-invitation:{principal.id}")
+    raw_token = secrets.token_urlsafe(40)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    client_ip = request.client.host if request.client else None
+    try:
+        with db.begin():
+            role = db.execute(
+                text(
+                    "SELECT id_rol, lower(trim(rol_nombre)) AS role_name FROM roles "
+                    "WHERE lower(trim(rol_nombre)) IN ('admin', 'administrador', 'superadministrador') "
+                    "AND estado_rol = 'ACT' "
+                    "ORDER BY CASE lower(trim(rol_nombre)) "
+                    "WHEN 'admin' THEN 0 WHEN 'administrador' THEN 1 ELSE 2 END LIMIT 1"
+                )
+            ).mappings().one_or_none()
+            if role is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="No active administrator role is provisioned",
+                )
+            email_exists = db.execute(
+                text(
+                    "SELECT 1 FROM usuarios WHERE lower(trim(usr_mail)) = :email "
+                    "OR lower(trim(usr_username)) = :email"
+                ),
+                {"email": body.email},
+            ).scalar_one_or_none()
+            if email_exists is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="An account with this email already exists",
+                )
+            db.execute(
+                text(
+                    "UPDATE apex_admin_invitations SET revoked_at = CURRENT_TIMESTAMP "
+                    "WHERE lower(email) = :email AND used_at IS NULL AND revoked_at IS NULL"
+                ),
+                {"email": body.email},
+            )
+            db.execute(
+                text(
+                    "INSERT INTO apex_admin_invitations "
+                    "(email, token_hash, role_id, created_by, expires_at) "
+                    "VALUES (:email, :token_hash, :role_id, :created_by, :expires_at)"
+                ),
+                {
+                    "email": body.email,
+                    "token_hash": hashlib.sha256(raw_token.encode()).hexdigest(),
+                    "role_id": role["id_rol"],
+                    "created_by": principal.id,
+                    "expires_at": expires_at,
+                },
+            )
+            _write_admin_audit(db, principal.id, "CREATE_INVITE", client_ip)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Could not create an invitation for this email",
+        ) from exc
+    return {
+        "email": body.email,
+        "invitation_token": raw_token,
+        "role": role["role_name"],
+        "expires_at": expires_at,
+    }
+
+
+@router.post("/admin/register", status_code=status.HTTP_201_CREATED)
+def register_admin(
+    body: AdminRegistrationRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    enforce_login_limit(f"admin-registration:{request.client.host if request.client else 'unknown'}")
+    parts = body.full_name.split()
+    if len(parts) < 2:
+        raise HTTPException(status_code=422, detail="Enter first and last name")
+    first_name = parts[0][:60]
+    last_name = " ".join(parts[1:])[:60]
+    token_hash = hashlib.sha256(body.invitation_token.encode()).hexdigest()
+    client_ip = request.client.host if request.client else None
+    try:
+        with db.begin():
+            invitation = db.execute(
+                text(
+                    "SELECT i.id, i.email, i.role_id, lower(trim(r.rol_nombre)) AS role_name "
+                    "FROM apex_admin_invitations i JOIN roles r ON r.id_rol = i.role_id "
+                    "WHERE i.token_hash = :token_hash AND i.used_at IS NULL AND i.revoked_at IS NULL "
+                    "AND i.expires_at > CURRENT_TIMESTAMP AND r.estado_rol = 'ACT' "
+                    "AND lower(trim(r.rol_nombre)) IN ('admin', 'administrador', 'superadministrador') "
+                    "FOR UPDATE OF i"
+                ),
+                {"token_hash": token_hash},
+            ).mappings().one_or_none()
+            if invitation is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invitation is invalid, expired, revoked, or already used",
+                )
+            user_id = secrets.token_urlsafe(16)[:16]
+            db.execute(
+                text(
+                    "INSERT INTO usuarios "
+                    "(id_usuario, usr_username, usr_passwordhash, usr_nombre, usr_apellido, usr_mail, "
+                    "usr_telefono, estado_usr) VALUES "
+                    "(:id, :username, :password_hash, :first_name, :last_name, :email, NULL, 'ACT')"
+                ),
+                {
+                    "id": user_id,
+                    "username": invitation["email"],
+                    "password_hash": hash_password(body.password),
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": invitation["email"],
+                },
+            )
+            db.execute(
+                text(
+                    "INSERT INTO usuariosxroles (id_usuario, id_rol, estado_uxr) "
+                    "VALUES (:user_id, :role_id, 'ACT')"
+                ),
+                {"user_id": user_id, "role_id": invitation["role_id"]},
+            )
+            db.execute(
+                text(
+                    "UPDATE apex_admin_invitations SET used_at = CURRENT_TIMESTAMP "
+                    "WHERE id = :id AND used_at IS NULL AND revoked_at IS NULL"
+                ),
+                {"id": invitation["id"]},
+            )
+            token, expires_at = issue_token(db, user_id)
+            _write_admin_audit(db, user_id, "REGISTER_INVITE", client_ip)
+        principal = Principal(
+            user_id,
+            invitation["email"].strip(),
+            f"{first_name} {last_name}",
+            frozenset({invitation["role_name"]}),
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email, username, or account identifier is already registered",
         ) from exc
     return _session_response(token, expires_at, principal)
 

@@ -119,3 +119,31 @@ def require_admin(principal: Principal = Depends(current_principal)) -> Principa
     if not principal.roles.intersection({"admin", "administrador", "superadministrador"}):
         raise HTTPException(status_code=403, detail="Administrator role required")
     return principal
+
+
+def authorize_permission(
+    db: Session,
+    principal: Principal,
+    module: str,
+    action: str,
+) -> None:
+    if "superadministrador" in principal.roles:
+        return
+    granted = db.execute(
+        text(
+            "SELECT 1 FROM usuariosxroles ur "
+            "JOIN roles r ON r.id_rol = ur.id_rol "
+            "JOIN rolesxpermisos rp ON rp.id_rol = r.id_rol "
+            "JOIN permisos p ON p.id_permiso = rp.id_permiso "
+            "WHERE ur.id_usuario = :user_id AND ur.estado_uxr = 'ACT' "
+            "AND r.estado_rol = 'ACT' AND rp.estado_rxp = 'ACT' "
+            "AND p.estado_prm = 'ACT' "
+            "AND lower(trim(p.prm_modulo)) = :module "
+            "AND lower(trim(p.prm_accion)) = :action "
+            "LIMIT 1"
+        ),
+        {"user_id": principal.id, "module": module, "action": action},
+    ).scalar_one_or_none()
+    if granted is None:
+        raise HTTPException(status_code=403, detail=f"Missing permission: {module}:{action}")
+    db.commit()

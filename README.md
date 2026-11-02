@@ -63,14 +63,17 @@ Free hosting is suitable for a school demo, not continuous 24/7 availability. Re
 1. Use a disposable/local PostgreSQL database first. This implementation was not connected to a remote Supabase database.
 2. The supplied `Scripts/Script-Creacion-Tablas.sql` and `Scripts/Script-Constrains-Tablas.sql` define the existing data contract. Apply those base tables and constraints only after reviewing them for the target PostgreSQL version and required seed/reference data. The wider supplied SQL bundle contains dialect-specific routines/seeds; do not assume those scripts are directly executable in PostgreSQL.
 3. Ensure these existing tables and keys are present before continuing: `USUARIOS`, `ROLES`, `USUARIOSxROLES`, `CIUDADES`, `CLIENTES`, `PRODUCTOS`, `CATEGORIAS`, `MARCAS`, `CARRITO`, and `DETALLE_CARRITO`.
-4. Manually apply the versioned checkout/API migration **once**, after the base schema:
+4. Manually apply the versioned API migrations **once and in order**, after the base schema:
 
    ```powershell
    psql "$env:DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/001_api_sessions_catalog_orders.sql
+   psql "$env:DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/002_favorites.sql
+   psql "$env:DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_admin_invitations.sql
+   psql "$env:DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_admin_workflows.sql
    ```
 
-   It creates revocable server-side sessions, the public product-slug map, stock-minimum policy, order snapshots, idempotency, and a stock-reservation ledger. It is not run at application startup.
-5. Provision the active customer role (`cliente`, `customer`, or `client` in `ROLES`) and seed `CIUDADES`, `PRODUCTOS`, `CATEGORIAS`, and `MARCAS`. Admin accounts are provisioned out-of-band; public signup cannot choose a role. Generate Argon2id hashes for new administrator credentials with `python -m app.hash_password` and provision the account/role assignment through a trusted operator workflow. Existing hashes with another format must be migrated/reset before these login endpoints can verify them.
+   Migration 001 creates revocable server-side sessions, the public product-slug map, stock-minimum policy, order snapshots, idempotency, and a stock-reservation ledger. Migration 002 creates `favoritos` when absent and adds a unique user/product index for idempotent writes. It preserves an existing favorites table; inspect its columns and resolve duplicate user/product rows before applying the index. Migration 003 creates expiring, single-use administrator invitations and stores only token digests. Migration 004 adds an append-only inventory movement record, seeds module/action permissions for existing administrator roles, and replaces legacy triggers so sales, receipts, and adjustments update stock only when confirmed; delivery completion does not deduct stock again. Apply it only after reviewing the approved stock policy and taking a database backup. Migrations are not run at application startup.
+5. Provision the active customer role (`cliente`, `customer`, or `client`) and seed `CIUDADES`, `PRODUCTOS`, `CATEGORIAS`, and `MARCAS`. Provision the first administrator out-of-band; public signup cannot choose a role. After migration 003, an authenticated administrator can create an invitation using `POST /api/v1/auth/admin/invitations` with `{"email":"new.admin@example.com"}`. The API returns a one-time `invitation_token` that is not emailed; share it securely with the invitee. The panel's Users view generates a registration link from this token. The invitation expires after 24 hours; issuing another invitation for the same email revokes the previous unused one. `POST /api/v1/auth/admin/register` consumes it once, creates the user and administrator role assignment in a transaction, and returns a session. Generate an Argon2id hash for the initial administrator with `python -m app.hash_password` and provision that account/role assignment through a trusted operator workflow. Existing hashes with another format must be migrated/reset before these login endpoints can verify them.
 6. Map each real legacy product key (`PRODUCTOS.id_Producto`, at most 10 characters) to its public slug through the administrator API:
 
    `PUT /api/v1/admin/catalog/mappings`
@@ -81,21 +84,31 @@ Free hosting is suitable for a school demo, not continuous 24/7 availability. Re
 ## Implemented API
 
 - `POST /api/v1/auth/register`, `POST /auth/login`, `GET /auth/me`, `DELETE /auth/session`
+- Admin-only `POST /api/v1/auth/admin/invitations`; invitation-gated, single-use `POST /api/v1/auth/admin/register`
 - `GET /products`, `GET /products/{slug}`, `GET /products/categories`, `GET /products/cities`
+- Authenticated `GET /favorites`, `PUT /favorites/{product_slug}`, and `DELETE /favorites/{product_slug}`. Every operation uses the user from the bearer token; mutations return the updated `{"items": [...]}` collection. Adding the same favorite more than once is safe, and deleting an absent favorite succeeds. Product slugs are resolved through `apex_product_catalog`; the legacy `CHAR(10)` product key is stored in `favoritos`.
 - Authenticated `GET /cart`, `PUT /cart/items`, `DELETE /cart/items/{slug}`
 - `POST /checkout` (requires `Idempotency-Key`), `GET /orders`, `GET /orders/{id}`, and cancellation for the current user's pending order
-- Admin-only database-backed summary and paginated reads for products, inventory, purchases, suppliers, receipts, sales/invoices, deliveries, customers, users, roles, audit records, and checkout orders
-- Admin product/catalog mapping edits, stock minimum settings, and explicit release of expired demo-order reservations
+- Permission-protected database-backed summary and paginated/filterable reads for products, inventory, purchases, suppliers, receipts, sales/invoices, deliveries, customers, users, roles, permissions, audit records, and checkout orders. `GET /api/v1/admin/resources/{resource}/{id}` returns associated details/lines; `/admin/lookups/{lookup}` supplies active form references.
+- Product and supplier/customer create/update/deactivate operations, product metadata/photos, and stock-minimum settings. Catalog IDs and foreign-key references are validated by PostgreSQL.
+- Purchase-order draft and approval; partial receipt lines and receipt confirmation; signed inventory adjustments with approval; invoice/sale draft and approval; and complete-delivery recording. These operations are transactional and audited. State codes are `ABI` (draft), `APR` (approved), `PEN` (pending receipt/delivery), `REC` (receipt confirmed), and `ENT` (delivery complete).
+- User profile/status management, role/permission reads, and superadministrator-only role assignment and permission changes. Administrator registration still uses one-time invitations; passwords are never editable through the admin user endpoint.
+- Summary metrics include date-bounded paid invoice totals, daily series, low-stock items, recent sales, and recent audit activity. `from`/`to` use inclusive ISO calendar dates; default is the last seven calendar days.
+- Explicit release of expired demo-order reservations
 
 Authentication uses Argon2id hashes and opaque bearer tokens whose SHA-256 digests are stored server-side with expiry and revocation. Login and registration have a per-process IP rate limit. Keep the API behind HTTPS in any non-local environment. Bearer tokens are held in browser `sessionStorage`; do not serve untrusted scripts from either interface origin.
 
 ## Checkout and known business limitations
 
+Registration requires `full_name`, `email`, `password`, `identification`, and `city_id`. Phone and address are not registration fields; the API stores `NULL` for those optional profile columns. Delivery phone, city, address, and reference are captured independently on each order and returned in that order's `delivery` snapshot.
+
 Checkout re-reads prices and inventory from PostgreSQL, locks products, reserves stock atomically, records immutable line/address snapshots, and clears the server cart in one transaction. Repeating the same user's idempotency key returns the original order. Reservations expire after 30 minutes and stock is released with a ledger entry when a user next checks their orders/checkout or an administrator calls `POST /api/v1/admin/orders/release-expired`. Schedule that endpoint operationally if abandoned reservations must be released without user/admin traffic.
 
 There is no payment provider. `payment_method` is fixed to `demo`, payment status is always `NOT_PROCESSED`, and the API stores no card number/CVV. Orders remain pending and must not be presented as paid or ready to ship. Delivery pricing and tax are not specified by the supplied schema/business rules, so the demo API currently records a zero delivery fee and no tax; the UI labels this unconfigured. Configure validated pricing/tax rules before production checkout.
 
-Admin interface modules use real, read-only data where the existing schema supports it. Product/catalog and minimum-stock updates have endpoints, but not every legacy module has a safe write workflow. Role-permission editing, purchase/receipt/adjustment workflows, invoice generation, delivery fulfillment, password recovery, and a payment-provider integration are not implemented. Existing supplied routines may need PostgreSQL dialect/behavior review before being used with this API.
+Admin invoices are created in `ABI` and approval changes them to `APR`; this API never sets `PAG` or claims that a payment was processed. The operator must verify payment outside this API. An approved sale deducts stock once and creates a pending delivery; completing a delivery records fulfilled quantities without another stock change. Purchase orders start in `ABI`; approval creates a pending receipt, and accepted receipt quantities enter stock only when that receipt is confirmed. Adjustments use a signed delta and apply only on approval; a negative resulting balance is rejected. Partial delivery is not enabled because the legacy schema does not define a partial-delivery status.
+
+Migration 004 grants the seeded module/action permissions to existing active administrator roles; subsequent permission changes are enforced per request. `superadministrador` can administer permission assignments and bypass individual grants. Provision at least one active superadministrator out-of-band before restricting role permissions. The API does not expose password changes, password recovery, fiscal invoicing, or a payment-provider integration. This migration and the new transactional APIs have not been run against the live database; verify the exact base schema/triggers in a disposable PostgreSQL instance before deployment.
 
 ## Local validation
 

@@ -10,9 +10,7 @@ def valid_registration() -> dict:
         "email": "Ada@example.com",
         "password": "a-very-long-password",
         "identification": "1234567890",
-        "phone": "0991234567",
         "city_id": "UIO",
-        "address": "Calle 1 y Calle 2",
     }
 
 
@@ -28,6 +26,14 @@ def test_registration_requires_customer_profile_fields() -> None:
     data.pop("city_id")
     with pytest.raises(ValidationError):
         RegisterRequest.model_validate(data)
+
+
+def test_registration_does_not_require_delivery_or_profile_contact_fields() -> None:
+    request = RegisterRequest.model_validate(valid_registration())
+    assert not hasattr(request, "phone")
+    assert not hasattr(request, "address")
+    with pytest.raises(ValidationError):
+        RegisterRequest.model_validate({**valid_registration(), "phone": "0991234567"})
 
 
 def test_registration_respects_legacy_username_and_customer_name_limits() -> None:

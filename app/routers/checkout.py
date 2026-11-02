@@ -18,7 +18,8 @@ def _order_payload(db: Session, order_id: str) -> dict:
     order = db.execute(
         text(
             "SELECT id, status, payment_status, subtotal, delivery_fee, total, "
-            "delivery_address, delivery_city, delivery_phone, delivery_method, created_at, expires_at "
+            "delivery_address, delivery_city, delivery_phone, delivery_reference, "
+            "delivery_method, created_at, expires_at "
             "FROM apex_orders WHERE id = :id"
         ),
         {"id": order_id},
@@ -42,6 +43,7 @@ def _order_payload(db: Session, order_id: str) -> dict:
             "address": order["delivery_address"],
             "city": order["delivery_city"],
             "phone": order["delivery_phone"],
+            "reference": order["delivery_reference"],
             "method": order["delivery_method"],
         },
         "createdAt": order["created_at"],
