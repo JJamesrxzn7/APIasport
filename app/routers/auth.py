@@ -165,7 +165,7 @@ def bootstrap_admin(
                 db,
                 user_id,
                 "APEX_ADMIN_BOOTSTRAP",
-                "CREATE_FIRST_SUPERADMIN",
+                "CREATE_SUPERADMIN",
                 new_value={"role_id": role_id},
                 client_ip=client_ip,
             )

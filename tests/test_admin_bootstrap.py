@@ -102,6 +102,8 @@ def test_bootstrap_creates_first_superadmin_once(monkeypatch) -> None:
     assert response["access_token"] == "opaque-token"
     assert "password" not in response
     assert audit_calls
+    assert audit_calls[0][0][3] == "CREATE_SUPERADMIN"
+    assert len(audit_calls[0][0][3]) <= 20
 
 
 def test_bootstrap_is_disabled_without_deployment_secret(monkeypatch) -> None:
