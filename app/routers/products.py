@@ -13,6 +13,7 @@ PRODUCT_COLUMNS = """
     p.pro_precio_venta AS price, p.pro_saldo_final AS stock,
     c.cat_nombre AS "categoryLabel", b.mar_nombre AS brand
 """
+PRODUCT_DETAIL_COLUMNS = PRODUCT_COLUMNS + ', m.product_id AS "productId"'
 BASE_PRODUCT_SQL = """
     FROM apex_product_catalog m
     JOIN productos p ON p.id_producto = m.product_id
@@ -99,9 +100,24 @@ def list_cities(db: Session = Depends(get_db)) -> list[dict]:
 @router.get("/{slug}")
 def get_product(slug: str, db: Session = Depends(get_db)) -> dict:
     row = db.execute(
-        text("SELECT " + PRODUCT_COLUMNS + " " + BASE_PRODUCT_SQL + " AND m.slug = :slug"),
+        text("SELECT " + PRODUCT_DETAIL_COLUMNS + " " + BASE_PRODUCT_SQL + " AND m.slug = :slug"),
         {"slug": slug},
     ).mappings().one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Product not found")
-    return _serialize(row)
+    photos = db.execute(
+        text(
+            "SELECT fot_url AS url FROM producto_fotografias "
+            "WHERE id_producto = :product_id AND estado_fot = 'ACT' "
+            "ORDER BY fot_orden, id_foto"
+        ),
+        {"product_id": row["productId"]},
+    ).mappings()
+    photo_urls = [photo["url"] for photo in photos if photo["url"] != row["imageUrl"]]
+    urls = [row["imageUrl"], *photo_urls]
+    product = _serialize(row)
+    product["images"] = [
+        {"url": url, "order": order}
+        for order, url in enumerate(dict.fromkeys(urls), start=1)
+    ]
+    return product

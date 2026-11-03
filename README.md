@@ -85,7 +85,7 @@ Free hosting is suitable for a school demo, not continuous 24/7 availability. Re
 
 - `POST /api/v1/auth/register`, `POST /auth/login`, `GET /auth/me`, `DELETE /auth/session`
 - Admin-only `POST /api/v1/auth/admin/invitations`; invitation-gated, single-use `POST /api/v1/auth/admin/register`
-- `GET /products`, `GET /products/{slug}`, `GET /products/categories`, `GET /products/cities`
+- `GET /products`, `GET /products/{slug}`, `GET /products/categories`, `GET /products/cities`; product detail retains `imageUrl` and adds an ordered `images` gallery from `producto_fotografias`.
 - Authenticated `GET /favorites`, `PUT /favorites/{product_slug}`, and `DELETE /favorites/{product_slug}`. Every operation uses the user from the bearer token; mutations return the updated `{"items": [...]}` collection. Adding the same favorite more than once is safe, and deleting an absent favorite succeeds. Product slugs are resolved through `apex_product_catalog`; the legacy `CHAR(10)` product key is stored in `favoritos`.
 - Authenticated `GET /cart`, `PUT /cart/items`, `DELETE /cart/items/{slug}`
 - `POST /checkout` (requires `Idempotency-Key`), `GET /orders`, `GET /orders/{id}`, and cancellation for the current user's pending order
