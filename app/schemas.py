@@ -62,6 +62,22 @@ class AdminRegistrationRequest(BaseModel):
     password: PasswordText
 
 
+class AdminBootstrapRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=120)]
+    email: EmailText
+    password: PasswordText
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        value = value.lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("Invalid email address")
+        return value
+
+
 class CartItemRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     product_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]

@@ -16,9 +16,17 @@ class Settings(BaseSettings):
     )
 
     database_url: SecretStr | None = None
+    admin_bootstrap_secret: SecretStr | None = None
     cors_origins: list[str] = Field(default_factory=list)
     auth_session_hours: int = Field(default=12, ge=1, le=168)
     password_hash_memory_kib: int = Field(default=65536, ge=19456, le=262144)
+
+    @field_validator("admin_bootstrap_secret")
+    @classmethod
+    def validate_admin_bootstrap_secret(cls, secret: SecretStr | None) -> SecretStr | None:
+        if secret is not None and len(secret.get_secret_value()) < 32:
+            raise ValueError("ADMIN_BOOTSTRAP_SECRET must contain at least 32 characters")
+        return secret
 
     @field_validator("cors_origins")
     @classmethod

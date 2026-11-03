@@ -1,15 +1,23 @@
 import hashlib
+import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import write_audit
+from app.config import settings
 from app.database import get_db
-from app.schemas import AdminInvitationRequest, AdminRegistrationRequest, LoginRequest, RegisterRequest
+from app.schemas import (
+    AdminBootstrapRequest,
+    AdminInvitationRequest,
+    AdminRegistrationRequest,
+    LoginRequest,
+    RegisterRequest,
+)
 from app.security import (
     Principal,
     current_principal,
@@ -40,6 +48,135 @@ def _session_response(token: str, expires_at: datetime, principal: Principal) ->
 
 def _write_admin_audit(db: Session, user_id: str, action: str, client_ip: str | None) -> None:
     write_audit(db, user_id, "APEX_ADMIN_INVITATIONS", action, client_ip=client_ip)
+
+
+@router.post("/admin/bootstrap", status_code=status.HTTP_201_CREATED)
+def bootstrap_admin(
+    body: AdminBootstrapRequest,
+    request: Request,
+    bootstrap_secret: str | None = Header(default=None, alias="X-Admin-Bootstrap-Secret"),
+    db: Session = Depends(get_db),
+) -> dict:
+    configured_secret = settings.admin_bootstrap_secret
+    if configured_secret is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    client_ip = request.client.host if request.client else "unknown"
+    enforce_login_limit(f"admin-bootstrap:{client_ip}")
+    expected_secret = configured_secret.get_secret_value()
+    if bootstrap_secret is None or not hmac.compare_digest(bootstrap_secret, expected_secret):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid bootstrap secret")
+
+    parts = body.full_name.split()
+    if len(parts) < 2:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Enter first and last name")
+
+    first_name = parts[0][:60]
+    last_name = " ".join(parts[1:])[:60]
+    user_id = secrets.token_urlsafe(16)[:16]
+    reserved_role_id = "SUP0000001"
+    try:
+        with db.begin():
+            db.execute(text("SELECT pg_advisory_xact_lock(hashtext('apex-admin-bootstrap'))"))
+            existing_admin = db.execute(
+                text(
+                    "SELECT 1 FROM usuariosxroles ur JOIN roles r ON r.id_rol = ur.id_rol "
+                    "WHERE ur.estado_uxr = 'ACT' AND r.estado_rol = 'ACT' "
+                    "AND lower(trim(r.rol_nombre)) IN "
+                    "('admin', 'administrador', 'superadministrador') LIMIT 1"
+                )
+            ).scalar_one_or_none()
+            if existing_admin is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="An active administrator already exists; use the invitation flow",
+                )
+
+            email_exists = db.execute(
+                text(
+                    "SELECT 1 FROM usuarios WHERE lower(trim(usr_mail)) = :email "
+                    "OR lower(trim(usr_username)) = :email"
+                ),
+                {"email": body.email},
+            ).scalar_one_or_none()
+            if email_exists is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="An account with this email already exists",
+                )
+
+            role = db.execute(
+                text(
+                    "SELECT id_rol FROM roles "
+                    "WHERE lower(trim(rol_nombre)) = 'superadministrador' "
+                    "ORDER BY id_rol LIMIT 1 FOR UPDATE"
+                )
+            ).mappings().one_or_none()
+            if role is None:
+                reserved_id_exists = db.execute(
+                    text("SELECT 1 FROM roles WHERE id_rol = :role_id"),
+                    {"role_id": reserved_role_id},
+                ).scalar_one_or_none()
+                if reserved_id_exists is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Role ID {reserved_role_id} is already in use; review the roles table",
+                    )
+                db.execute(
+                    text(
+                        "INSERT INTO roles (id_rol, rol_nombre, rol_descripcion, estado_rol) "
+                        "VALUES (:id, 'superadministrador', 'Superadministrador de Apex Sports', 'ACT')"
+                    ),
+                    {"id": reserved_role_id},
+                )
+                role_id = reserved_role_id
+            else:
+                role_id = role["id_rol"]
+                db.execute(
+                    text("UPDATE roles SET estado_rol = 'ACT' WHERE id_rol = :role_id"),
+                    {"role_id": role_id},
+                )
+
+            db.execute(
+                text(
+                    "INSERT INTO usuarios "
+                    "(id_usuario, usr_username, usr_passwordhash, usr_nombre, usr_apellido, usr_mail, "
+                    "usr_telefono, estado_usr) VALUES "
+                    "(:id, :username, :password_hash, :first_name, :last_name, :email, NULL, 'ACT')"
+                ),
+                {
+                    "id": user_id,
+                    "username": body.email,
+                    "password_hash": hash_password(body.password),
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": body.email,
+                },
+            )
+            db.execute(
+                text(
+                    "INSERT INTO usuariosxroles (id_usuario, id_rol, estado_uxr) "
+                    "VALUES (:user_id, :role_id, 'ACT')"
+                ),
+                {"user_id": user_id, "role_id": role_id},
+            )
+            token, expires_at = issue_token(db, user_id)
+            write_audit(
+                db,
+                user_id,
+                "APEX_ADMIN_BOOTSTRAP",
+                "CREATE_FIRST_SUPERADMIN",
+                new_value={"role_id": role_id},
+                client_ip=client_ip,
+            )
+        principal = Principal(user_id, body.email, body.full_name, frozenset({"superadministrador"}))
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Could not create the administrator account",
+        ) from exc
+    return _session_response(token, expires_at, principal)
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
