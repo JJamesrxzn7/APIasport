@@ -454,12 +454,28 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)) -
 
 
 @router.get("/me")
-def me(principal: Principal = Depends(current_principal)) -> dict:
+def me(
+    principal: Principal = Depends(current_principal),
+    db: Session = Depends(get_db),
+) -> dict:
+    customer = db.execute(
+        text(
+            "SELECT trim(c.cli_ruc_ced) AS identification, "
+            "trim(c.cli_telefono) AS phone, trim(ci.ciu_descripcion) AS city "
+            "FROM clientes c LEFT JOIN ciudades ci ON ci.id_ciudad = c.id_ciudad "
+            "WHERE c.id_usuario = :user_id AND c.estado_cli = 'ACT' "
+            "ORDER BY c.id_cliente LIMIT 1"
+        ),
+        {"user_id": principal.id},
+    ).mappings().one_or_none()
     return {
         "id": principal.id,
         "email": principal.email,
         "name": principal.name,
         "roles": sorted(principal.roles),
+        "identification": customer["identification"] if customer else None,
+        "city": customer["city"] if customer else None,
+        "phone": customer["phone"] if customer else None,
     }
 
 
