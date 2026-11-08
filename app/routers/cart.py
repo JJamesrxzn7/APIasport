@@ -107,7 +107,7 @@ def set_cart_item(
         db.execute(
             text(
                 "INSERT INTO detalle_carrito "
-                "(id_carrito, id_producto, dtc_cantidad, dtc_precio_unitario) "
+                "(id_carrito, id_producto, dtc_cantidad, dtc_preciounitario) "
                 "VALUES (:cart_id, :product_id, :quantity, :price)"
             ),
             values,
@@ -115,7 +115,7 @@ def set_cart_item(
     else:
         db.execute(
             text(
-                "UPDATE detalle_carrito SET dtc_cantidad = :quantity, dtc_precio_unitario = :price "
+                "UPDATE detalle_carrito SET dtc_cantidad = :quantity, dtc_preciounitario = :price "
                 "WHERE id_detalle = :detail_id"
             ),
             {**values, "detail_id": detail_id},
