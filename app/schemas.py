@@ -92,3 +92,4 @@ class CheckoutRequest(BaseModel):
     delivery_reference: Annotated[str | None, StringConstraints(strip_whitespace=True, max_length=120)] = None
     delivery_method: Literal["estandar", "express"] = "estandar"
     payment_method: Literal["demo"] = "demo"
+    simulated_method: Literal["tarjeta", "transferencia", "retiro"] | None = None

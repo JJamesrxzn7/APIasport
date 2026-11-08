@@ -88,8 +88,9 @@ class CheckoutSession:
         if "INSERT INTO apex_orders" in sql:
             self.orders[params["id"]] = {
                 "id": params["id"],
-                "status": "AWAITING_DEMO_PAYMENT",
+                "status": params["status"],
                 "payment_status": "NOT_PROCESSED",
+                "simulated_method": params["simulated_method"],
                 "subtotal": params["subtotal"],
                 "delivery_fee": params["fee"],
                 "total": params["total"],
@@ -138,7 +139,7 @@ def db() -> Iterator[Session]:
             text(
                 "CREATE TABLE apex_orders ("
                 "id CHAR(15), user_id CHAR(16), status VARCHAR(32), payment_status VARCHAR(24), "
-                "subtotal NUMERIC(10, 2), delivery_fee NUMERIC(10, 2), total NUMERIC(10, 2), "
+                "subtotal NUMERIC(10, 2), delivery_fee NUMERIC(10, 2), total NUMERIC(10, 2), simulated_method VARCHAR(16), "
                 "delivery_address VARCHAR(120), delivery_city VARCHAR(60), delivery_phone VARCHAR(20), "
                 "delivery_reference VARCHAR(120), delivery_method VARCHAR(16), "
                 "created_at TIMESTAMP, expires_at TIMESTAMP)"
@@ -172,7 +173,7 @@ def db() -> Iterator[Session]:
                 text(
                     "INSERT INTO apex_orders VALUES "
                     "(:id, :user_id, 'AWAITING_DEMO_PAYMENT', 'NOT_PROCESSED', "
-                    "10.00, 0.00, 10.00, :address, :city, :phone, :reference, "
+                    "10.00, 0.00, 10.00, NULL, :address, :city, :phone, :reference, "
                     "'estandar', CURRENT_TIMESTAMP, '2099-01-01 00:00:00')"
                 ),
                 {
@@ -251,3 +252,37 @@ def test_customer_cannot_read_another_users_order(db: Session) -> None:
     with pytest.raises(HTTPException) as error:
         get_my_order("ORDER0000000001", OTHER, db)
     assert error.value.status_code == 404
+
+
+@pytest.mark.parametrize(("method", "fee"), [("estandar", 200), ("express", 600)])
+def test_checkout_calculates_delivery_fee_on_server(method: str, fee: int) -> None:
+    db = CheckoutSession()
+    request = CheckoutRequest(
+        delivery_address="Casa 1",
+        delivery_city="Quito",
+        delivery_phone="0991111111",
+        delivery_method=method,
+    )
+
+    order = create_order(request, f"checkout-{method}", OWNER, db)
+
+    assert order["subtotalCents"] == 1000
+    assert order["deliveryFeeCents"] == fee
+    assert order["totalCents"] == 1000 + fee
+
+
+@pytest.mark.parametrize(("method", "fee"), [("tarjeta", 200), ("transferencia", 200), ("retiro", 0)])
+def test_simulated_checkout_records_method_and_correct_fee(method: str, fee: int) -> None:
+    db = CheckoutSession()
+    request = CheckoutRequest(
+        delivery_address="Casa 1",
+        delivery_city="Quito",
+        delivery_phone="0991111111",
+        simulated_method=method,
+    )
+    order = create_order(request, f"checkout-{method}", OWNER, db)
+    assert order["status"] == "SIMULATED_COMPLETE"
+    assert order["paymentStatus"] == "NOT_PROCESSED"
+    assert order["simulatedMethod"] == method
+    assert order["deliveryFeeCents"] == fee
+    assert order["totalCents"] == 1000 + fee

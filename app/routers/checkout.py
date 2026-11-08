@@ -12,12 +12,13 @@ from app.security import Principal, current_principal
 
 router = APIRouter(tags=["orders"])
 ORDER_CHARS = string.ascii_uppercase + string.digits
+DELIVERY_FEES = {"estandar": Decimal("2.00"), "express": Decimal("6.00")}
 
 
 def _order_payload(db: Session, order_id: str) -> dict:
     order = db.execute(
         text(
-            "SELECT id, status, payment_status, subtotal, delivery_fee, total, "
+            "SELECT id, status, payment_status, subtotal, delivery_fee, total, simulated_method, "
             "delivery_address, delivery_city, delivery_phone, delivery_reference, "
             "delivery_method, created_at, expires_at "
             "FROM apex_orders WHERE id = :id"
@@ -35,6 +36,7 @@ def _order_payload(db: Session, order_id: str) -> dict:
         "id": order["id"].strip(),
         "status": order["status"],
         "paymentStatus": order["payment_status"],
+        "simulatedMethod": order["simulated_method"],
         "paymentMessage": "Demo checkout: no payment was processed.",
         "subtotalCents": int(Decimal(order["subtotal"]) * 100),
         "deliveryFeeCents": int(Decimal(order["delivery_fee"]) * 100),
@@ -179,17 +181,17 @@ def create_order(
                 (Decimal(item["pro_precio_venta"]) * item["dtc_cantidad"] for item in items),
                 Decimal("0.00"),
             ).quantize(Decimal("0.01"))
-            # Tax and delivery pricing are not defined by the supplied business schema.
-            delivery_fee = Decimal("0.00")
+            delivery_fee = Decimal("0.00") if body.simulated_method == "retiro" else DELIVERY_FEES[body.delivery_method]
             total = subtotal + delivery_fee
+            order_status = "SIMULATED_COMPLETE" if body.simulated_method else "AWAITING_DEMO_PAYMENT"
             db.execute(
                 text(
                     "INSERT INTO apex_orders "
-                    "(id, user_id, client_id, idempotency_key, status, payment_status, payment_method, "
+                    "(id, user_id, client_id, idempotency_key, status, payment_status, payment_method, simulated_method, "
                     "subtotal, delivery_fee, total, delivery_address, delivery_city, delivery_phone, "
                     "delivery_reference, delivery_method, created_at, expires_at) "
-                    "VALUES (:id, :user, :client, :key, 'AWAITING_DEMO_PAYMENT', 'NOT_PROCESSED', "
-                    "'demo', :subtotal, :fee, :total, :address, :city, :phone, :reference, "
+                    "VALUES (:id, :user, :client, :key, :status, 'NOT_PROCESSED', "
+                    "'demo', :simulated_method, :subtotal, :fee, :total, :address, :city, :phone, :reference, "
                     ":method, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '30 minutes')"
                 ),
                 {
@@ -197,6 +199,8 @@ def create_order(
                     "user": principal.id,
                     "client": client,
                     "key": idempotency_key,
+                    "status": order_status,
+                    "simulated_method": body.simulated_method,
                     "subtotal": subtotal,
                     "fee": delivery_fee,
                     "total": total,
@@ -315,8 +319,8 @@ def cancel_my_order(
         ).scalar_one_or_none()
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
-        if order != "AWAITING_DEMO_PAYMENT":
-            raise HTTPException(status_code=409, detail="Only pending demo orders can be cancelled")
+        if order not in {"AWAITING_DEMO_PAYMENT", "SIMULATED_COMPLETE"}:
+            raise HTTPException(status_code=409, detail="Only active simulated orders can be cancelled")
         lines = db.execute(
             text(
                 "SELECT product_id, quantity FROM apex_order_lines "
